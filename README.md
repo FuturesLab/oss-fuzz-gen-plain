@@ -14,7 +14,7 @@ This container reuse is used across many files, but most notably in:
 - [agent/one_prompt_enhancer.py](.agent/one_prompt_enhancer.py) and [agent/one_prompt_prototyper.py](./agent/one_prompt_prototyper.py)
 - [experiment/builder_runner.py](./experiment/builder_runner.py)
 
-Changes also include logic for checking for the environment variable `SAVE_STORAGE_MEM` to reduce the storage size of the output directory.
+Changes also include logic for checking for the environment variable `SAVE_STORAGE_MEM` to reduce the storage size of the output directory, and changes to the textcov class to avoid counting empty lines and driver code as line coverage.
 
 # A Framework for Fuzz Target Generation and Evaluation
 
