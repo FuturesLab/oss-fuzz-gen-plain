@@ -1,16 +1,3 @@
-# Copyright 2024 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 """Textcov parsing and analysis."""
 
 from __future__ import annotations
@@ -62,7 +49,7 @@ def _discard_fuzz_target_lines(covreport_content: str) -> str:
     project_file_contents = [
         sec
         for sec in covreport_content.split("\n\n")
-        if "LLVMFuzzerTestOneInput" not in sec or "fuzz_target" not in sec
+        if "LLVMFuzzerTestOneInput" not in sec and "fuzz_target" not in sec
     ]
     return "\n\n".join(project_file_contents)
 
@@ -126,6 +113,9 @@ class Function:
     @property
     def covered_lines(self):
         return sum(1 for l in self.lines.values() if l.hit_count > 0)
+    
+    def print_covered_lines(self):
+        return "\n".join([l for l, k in self.lines.items() if k.hit_count > 0])
 
     def subtract_covered_lines(self, other: Function, language: str = "c++"):
         """Subtract covered lines."""
@@ -164,6 +154,9 @@ class File:
     @property
     def covered_lines(self):
         return sum(1 for l in self.lines.values() if l.hit_count > 0)
+    
+    def print_covered_lines(self):
+        return "\n".join([l for l, k in self.lines.items() if k.hit_count > 0])
 
     def subtract_covered_lines(self, other: File):
         """Subtract covered lines."""
@@ -261,6 +254,8 @@ class Textcov:
                 hit_count = _parse_hitcount(match.group(1))
                 # Ignore whitespace differences
                 line_contents = match.group(2).strip()
+                if line_contents == "":
+                    continue
 
                 if line_contents in current_function.lines:
                     current_function.lines[line_contents].hit_count += hit_count
@@ -515,6 +510,12 @@ class Textcov:
             return sum(f.covered_lines for f in self.files.values())
 
         return sum(f.covered_lines for f in self.functions.values())
+    
+    def print_covered_lines(self):
+        if self.language == "python":
+            return sum(f.print_covered_lines() for f in self.files.values())
+        
+        return "\n".join([f.print_covered_lines() for f in self.functions.values() if f.covered_lines > 0])
 
     @property
     def total_lines(self):
