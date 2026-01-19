@@ -14,14 +14,15 @@
 """A tool for LLM agents to interact within a project's docker container."""
 import logging
 import os
+import re
 import subprocess as sp
 import time
 from typing import Optional
 
-from experiment import oss_fuzz_checkout
-from experiment.benchmark import Benchmark
-from experiment.workdir import WorkDirs
-from tool.base_tool import BaseTool
+from project.benchmark import Benchmark
+from utils.workdir import WorkDirs
+from utils import oss_fuzz_checkout
+from execution.base_tool import BaseTool
 
 logger = logging.getLogger(__name__)
 # logger.setLevel(logging.DEBUG)
@@ -40,24 +41,66 @@ Execution Stage:
 
 class ProjectContainerTool(BaseTool):
     """A tool for LLM agents to interact within a project's docker container."""
+    SANITIZERS = ["coverage", "address"]
 
     def __init__(
-        self, benchmark: Benchmark, name: str = "", project_name: str = ""
+        self, benchmark: Benchmark, sanitizer: str, name: str = "", project_name: str = ""
     ) -> None:
         super().__init__(benchmark, name)
+        
+        self.benchmark = benchmark
+        self.sanitizer = sanitizer
         self.project_name = project_name or benchmark.project
-        self.image_name = self._prepare_project_image(self.project_name)
-        self.generated_oss_fuzz_name = os.path.basename(self.image_name)
-        self.generated_project_path = os.path.join(
-            oss_fuzz_checkout.OSS_FUZZ_DIR, "projects", self.generated_oss_fuzz_name
-        )
+        
+        self._validate_sanitizer()
+        self.image_name = self._prepare_project_image(self.project_name, self.sanitizer)
+        self.rebuild_chronos_success = self._check_chronos_build_success()
+        
+        self.generated_oss_fuzz_name = self._get_project_name()
+        self.generated_project_path = self._get_project_path()
+        
         self.vmap_outdir = get_build_artifact_dir(self.generated_oss_fuzz_name, "out")
         self.vmap_workdir = get_build_artifact_dir(self.generated_oss_fuzz_name, "work")
+        
         self.container_id = self._start_docker_container()
-        self._setup_container_env()
         self.build_script_path = "/src/build.sh"
         self._backup_default_build_script()
         self.project_dir = self._get_project_dir()
+        
+        if not self.rebuild_chronos_success:
+            self._setup_container_env()
+        
+        self.avg_cov_runtime = -1
+        self.total_cov_executions = 0
+
+        logger.info(
+            "Generated image %s -- container -- %s linked to directory %s",
+            self.image_name,
+            self.container_id,
+            self.generated_project_path,
+        )
+
+    def _validate_sanitizer(self):
+        if self.sanitizer not in self.SANITIZERS:
+            raise ValueError(
+                "Supplied sanitizer is invalid. Please provide 'address' or 'coverage'"
+            )
+
+    def _check_chronos_build_success(self) -> bool:
+        success = "ofg-cached" in self.image_name
+        if success:
+            logger.info("Successfully built image %s with rebuild chronos", self.image_name)
+        return success
+
+    def _get_project_name(self) -> str:
+        # Strip out -ofg-cached-* tags
+        return re.sub(r"-ofg-cached-.*$", "", os.path.basename(self.image_name))
+
+    def _get_project_path(self) -> str:
+        return os.path.join(
+            oss_fuzz_checkout.OSS_FUZZ_DIR, "projects", self.generated_oss_fuzz_name
+        )
+
 
     def tutorial(self) -> str:
         """Constructs a tool guide tutorial for LLM agents."""
@@ -73,17 +116,12 @@ export -f mkdir
 EOF"""
         self.execute(command)
 
-    def _prepare_project_image(self, project_name: str) -> str:
+    def _prepare_project_image(self, project_name: str, sanitizer: str) -> str:
         """Prepares the project's OSS-Fuzz docker image and returns the image name."""
-        image_name = oss_fuzz_checkout.prepare_project_image_by_name(project_name)
+        image_name = oss_fuzz_checkout.prepare_project_image_by_name_w_rebuild(project_name, sanitizer)
         if image_name:
             return image_name
-        raise Exception(f"Failed to build image for {project_name}")
-        # image_name = oss_fuzz_checkout.prepare_project_image(
-        #     self.benchmark, project_name)
-        # if image_name:
-        #   return image_name
-        # raise Exception(f"Failed to build image for {project_name}")
+        raise RuntimeError(f"Failed to build image for {project_name}")
 
     def _execute_command_in_container(
         self, command: list[str], log_path: Optional[str] = None
@@ -95,8 +133,8 @@ EOF"""
         try:
             result = sp.run(
                 command,
-                stdout=log_file,
-                stderr=sp.PIPE,
+                stdout=sp.PIPE,
+                stderr=log_file,
                 check=False,
                 text=True,
                 encoding="utf-8",
@@ -192,14 +230,12 @@ EOF"""
             f"PROJECT_NAME={self.generated_oss_fuzz_name}",
             "-e",
             f"FUZZING_LANGUAGE={self.benchmark.language}",
-            "-e",
-            "ASAN_OPTIONS=detect_leaks=0",
             "-v",
             f"{self.vmap_outdir}:/out",
             "-v",
             f"{self.vmap_workdir}:/work",
             "--entrypoint=/bin/bash",
-            f"gcr.io/oss-fuzz/{self.generated_oss_fuzz_name}",
+            f"{self.image_name}",
         ]
         os.makedirs(self.vmap_outdir, exist_ok=True)
         os.makedirs(self.vmap_workdir, exist_ok=True)
@@ -231,35 +267,40 @@ EOF"""
     def compile(
         self,
         extra_commands: str = "",
-        sanitizer: str = "",
         log_path: Optional[str] = None,
     ) -> sp.CompletedProcess:
         """Compiles the fuzz target."""
-        mkdir_alias = "source /etc/profile.d/mkdir.sh; "
-        command = "compile > /dev/null" + extra_commands
-        if sanitizer:
-            command = f"SANITIZER={sanitizer} " + command
+        command = "compile" + extra_commands
+        command = f"SANITIZER={self.sanitizer} " + command
+        if not self.rebuild_chronos_success:
+            mkdir_alias = "source /etc/profile.d/mkdir.sh; "
+            command = mkdir_alias + command
+
         begin_time = time.time()
-        compile_process = self.execute(mkdir_alias + command, log_path)
+        compile_process = self.execute(command, log_path)
         end_time = time.time()
         # Hide Compilation command so that LLM won't reuse it in the inspection tool
         # and be distracted by irrelevant errors, e.g., `build/ already exits`.
         compile_process.args = "# Compiles the fuzz target."
-        logger.info(
-            "**** Container %s: Compiled reusable container with sanitizer %s in %.4f seconds****",
-            self.container_id,
-            sanitizer,
-            end_time - begin_time,
-        )
+        if compile_process.returncode == 0:
+            logger.debug(
+                "Container %s: Successfully compiled fuzz driver with sanitizer %s in %.4f seconds",
+                self.container_id,
+                self.sanitizer,
+                end_time - begin_time,
+            )
         return compile_process
 
-    def fuzz(self, workdirs: WorkDirs, run_timeout: int, log_path: str) -> None:
-        logger.info("**** Fuzzing with reusable container ****")
-        corpus_dir = workdirs.corpus(self.benchmark.target_name)
+    def fuzz(
+        self, workdirs: WorkDirs, run_timeout: int, log_path: str, harness_id: str
+    ) -> None:
+        corpus_dir = workdirs.corpus(harness_id)
         command = [
             "python3",
             "infra/helper.py",
             "run_fuzzer",
+            "-e",
+            "ASAN_OPTIONS=detect_leaks=0",
             "--corpus-dir",
             corpus_dir,
             self.generated_oss_fuzz_name,
@@ -275,25 +316,34 @@ EOF"""
                 stderr=sp.STDOUT,
                 cwd=oss_fuzz_checkout.OSS_FUZZ_DIR,
             )
-            logger.debug("RUNNING COMMAND: %s", " ".join(command))
-            # TODO(ochang): Handle the timeout exception.
             try:
                 proc.wait(timeout=run_timeout + 5)
             except sp.TimeoutExpired:
                 logger.info("%s timed out during fuzzing.", self.generated_project_path)
                 # Try continuing and parsing the logs even in case of timeout.
         if proc.returncode != 0:
-            logger.info(
-                "********** Failed to run %s. **********", self.generated_project_path
+            logger.debug(
+                "Container %s: Fuzzing trial terminated with non-zero exit code",
+                self.container_id,
             )
-            logger.info("OUTPUT: %s", open(log_path, "r").read())
         else:
-            logger.info("Successfully run %s.", self.generated_project_path)
+            logger.debug(
+                "Container %s: Fuzzing trial was successful",
+                self.container_id,
+            )
 
-    def get_coverage(self, workdirs: WorkDirs) -> None:
+    def update_runtime(self, runtime: float) -> None:
+        self.total_cov_executions += 1
+        if self.avg_cov_runtime < 0:
+            self.avg_cov_runtime = runtime
+        self.avg_cov_runtime += (
+            runtime - self.avg_cov_runtime
+        ) / self.total_cov_executions
+
+    def get_coverage(self, workdirs: WorkDirs, harness_id: str) -> sp.CompletedProcess:
         """Allocate two minutes for coverage collection"""
-        logger.info("**** Getting coverage with reusable container ****")
-        corpus_dir = workdirs.corpus(self.benchmark.target_name)
+        corpus_dir = workdirs.corpus(harness_id)
+        logger.debug("Corpus %s has size: %d", corpus_dir, len(os.listdir(corpus_dir)))
         command = [
             "python3",
             "infra/helper.py",
@@ -307,22 +357,26 @@ EOF"""
             "--no-serve",
             self.generated_oss_fuzz_name,
         ]
-        logger.debug("RUNNING COMMAND: %s", " ".join(command))
+        # add two seconds to the average timeout to accomodate for slower harnesses
+        timeout_threshold = self.avg_cov_runtime + 2 if self.avg_cov_runtime > 0 else 30
         try:
-            sp.run(
+            proc_start = time.perf_counter()
+            proc = sp.run(
                 command,
                 capture_output=True,
                 cwd=oss_fuzz_checkout.OSS_FUZZ_DIR,
                 stdin=sp.DEVNULL,
                 check=True,
-                timeout=120,
+                timeout=timeout_threshold,
             )
+            proc_runtime = time.perf_counter() - proc_start
+            self.update_runtime(proc_runtime)
+            logger.debug("Container stdout:\n%s", proc.stdout)
         except sp.TimeoutExpired as e:
             logger.info(
-                "Coverage timed out for %s:\n%s\n%s",
+                "Coverage timed out in %s seconds for %s",
+                timeout_threshold,
                 self.generated_oss_fuzz_name,
-                e.stdout,
-                e.stderr,
             )
         except sp.CalledProcessError as e:
             logger.info(
@@ -331,20 +385,6 @@ EOF"""
                 e.stdout,
                 e.stderr,
             )
-
-    def terminate(self) -> bool:
-        """Terminates and removes the container."""
-        # For testing purposes, don't do anything
-        return True
-        # terminate_container_command = ["docker", "stop", self.container_id]
-        # result = self._execute_command(terminate_container_command)
-        # if result:
-        #   return result
-        # remove_container_command = ["docker", "rm", self.container_id]
-        # result = self._execute_command(remove_container_command)
-        # remove_image_command = ["docker", "rmi", self.image_name]
-        # result = self._execute_command(remove_image_command)
-        # return result.returncode == 0
 
     def rewrite_driver(self, content: str) -> None:
         self.write_to_file(content, self.benchmark.target_path)

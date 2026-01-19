@@ -25,7 +25,7 @@ import uuid
 
 import yaml
 
-from experiment import benchmark as benchmarklib
+from project import benchmark as benchmarklib
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -421,6 +421,29 @@ def _build_image(project_name: str) -> str:
         )
         return ""
 
+def _build_image_w_rebuild(project_name: str, sanitizer: str) -> str:
+    """Builds project image in OSS-Fuzz"""
+    adjusted_env = os.environ | {"FUZZING_LANGUAGE": get_project_language(project_name)}
+    command = ["python3", "infra/experimental/chronos/manager.py", "check-replay-script", "--sanitizer", sanitizer, project_name]
+    try:
+        sp.run(
+            command,
+            cwd=OSS_FUZZ_DIR,
+            env=adjusted_env,
+            stdout=sp.PIPE,
+            stderr=sp.PIPE,
+            check=True,
+        )
+        img_name = _get_project_cache_image_name(project_name, sanitizer)
+        logger.info("Successfully build project image for %s", img_name)
+        return img_name
+    except sp.CalledProcessError as e:
+        logger.error(
+            "Failed to build project image for %s: %s",
+            project_name,
+            e.stderr.decode("utf-8"),
+        )
+        return ""
 
 def rectify_docker_tag(docker_tag: str) -> str:
     # Replace "::" and any character not \w, _, or . with "-".
@@ -522,3 +545,36 @@ def prepare_project_image_by_name(project_name: str) -> str:
     else:
         logger.warning("Unable to find cached project image for %s", project)
     return _build_image(generated_oss_fuzz_project)
+
+def prepare_project_image_by_name_w_rebuild(project_name: str, sanitizer: str) -> str:
+    """Prepares original image of the |project_name|'s fuzz target build
+    container, also enabling fast rebuilding with infra/chronos."""
+    project = project_name
+    image_name = f"gcr.io/oss-fuzz/{project}"
+    generated_oss_fuzz_project = f"{project_name}-{uuid.uuid4().hex}"
+    generated_oss_fuzz_project = rectify_docker_tag(generated_oss_fuzz_project)
+    create_ossfuzz_project_by_name(project, generated_oss_fuzz_project)
+
+    if not ENABLE_CACHING:
+        logger.warning("Disabled caching when building image for %s", project)
+    elif is_image_cached(project, "address"):
+        logger.info("Will use cached instance.")
+        # Rewrite for caching.
+        rewrite_project_to_cached_project(
+            project, generated_oss_fuzz_project, "address"
+        )
+        # Prepare build
+        prepare_build(project, "address", generated_oss_fuzz_project)
+        # Build the image
+        logger.info(
+            "Using cached project image for %s: %s",
+            generated_oss_fuzz_project,
+            image_name,
+        )
+    else:
+        logger.warning("Unable to find cached project image for %s", project)
+    res = _build_image_w_rebuild(generated_oss_fuzz_project, sanitizer)
+    if res is not None:
+        return res
+    else:
+        return _build_image(generated_oss_fuzz_project)

@@ -28,10 +28,10 @@ class ContainerPool:
             self.containers.put(self.create_container_pair(benchmark))
 
     def create_container_pair(self, benchmark: Benchmark) -> ContainerPair:
-        address = ProjectContainerTool(benchmark=benchmark)
+        address = ProjectContainerTool(benchmark=benchmark, sanitizer="address")
 
         oss_fuzz_checkout.ENABLE_CACHING = False
-        coverage = ProjectContainerTool(benchmark=benchmark)
+        coverage = ProjectContainerTool(benchmark=benchmark, sanitizer="coverage")
         oss_fuzz_checkout.ENABLE_CACHING = True
 
         return ContainerPair(address, coverage)
@@ -41,4 +41,3 @@ class ContainerPool:
 
     def release_container_pair(self, pair: ContainerPair):
         self.containers.put(pair)
-    
