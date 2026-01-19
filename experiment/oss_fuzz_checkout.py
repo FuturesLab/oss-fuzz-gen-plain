@@ -423,27 +423,36 @@ def _build_image(project_name: str) -> str:
 
 def _build_image_w_rebuild(project_name: str, sanitizer: str) -> str:
     """Builds project image in OSS-Fuzz"""
+    # Keeping up to date with this OSS-Fuzz Commit: https://github.com/google/oss-fuzz/commit/1910ad53edcfd60f493a80cd7f2b6b4866419d49 (Dec 16, 2025)
     adjusted_env = os.environ | {"FUZZING_LANGUAGE": get_project_language(project_name)}
-    command = ["python3", "infra/experimental/chronos/manager.py", "check-replay-script", "--sanitizer", sanitizer, project_name]
+    command = ["python3", "infra/helper.py", "check-replay", "--sanitizer", sanitizer, project_name]
+    success = False
+    output = ""
     try:
-        sp.run(
+        proc = sp.run(
             command,
             cwd=OSS_FUZZ_DIR,
             env=adjusted_env,
             stdout=sp.PIPE,
             stderr=sp.PIPE,
-            check=True,
+            check=False,
         )
-        img_name = _get_project_cache_image_name(project_name, sanitizer)
-        logger.info("Successfully build project image for %s", img_name)
-        return img_name
+        output =  proc.stderr.decode("utf-8")
+        success = "vanilla build Succeeded:" in output
     except sp.CalledProcessError as e:
+        output = e.stderr.decode("utf-8")
+
+    if not success:
         logger.error(
             "Failed to build project image for %s: %s",
             project_name,
-            e.stderr.decode("utf-8"),
+            output,
         )
         return ""
+    img_name = _get_project_cache_image_name(project_name, sanitizer)
+    logger.info("Successfully build project image for %s", img_name)
+    return img_name
+
 
 def rectify_docker_tag(docker_tag: str) -> str:
     # Replace "::" and any character not \w, _, or . with "-".
