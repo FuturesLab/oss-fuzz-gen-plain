@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from multiprocessing import Manager, Queue
 from typing import Optional
 
-from project.benchmark import Benchmark
-from utils import oss_fuzz_checkout
-from execution.container_tool import ProjectContainerTool
+from experiment.benchmark import Benchmark
+from experiment import oss_fuzz_checkout
+from tool.container_tool import ProjectContainerTool
 
 logger = logging.getLogger(__name__)
 
@@ -19,21 +19,19 @@ class ContainerPair:
 
 class ContainerPool:
     """This class represents a pool of containers. Each item in the pool has one container instrumented with ASAN and one for coverage"""
+    SYSTEM_CORES = 24
 
-    def __init__(self, benchmark: Benchmark, num_cores: int):
+    def __init__(self, benchmark: Benchmark, pool_size: int):
         manager = Manager()
         self.containers = manager.Queue()
-        logger.info("Initializing %d container pairs for the trial", num_cores)
-        for _ in range(num_cores):
-            self.containers.put(self.create_container_pair(benchmark))
+        logger.info("Initializing %d container pairs for the trial", pool_size)
+        cores_per_container = max(1, int(self.SYSTEM_CORES) / pool_size)
+        for _ in range(pool_size):
+            self.containers.put(self.create_container_pair(benchmark, cores_per_container))
 
-    def create_container_pair(self, benchmark: Benchmark) -> ContainerPair:
-        address = ProjectContainerTool(benchmark=benchmark, sanitizer="address")
-
-        oss_fuzz_checkout.ENABLE_CACHING = False
-        coverage = ProjectContainerTool(benchmark=benchmark, sanitizer="coverage")
-        oss_fuzz_checkout.ENABLE_CACHING = True
-
+    def create_container_pair(self, benchmark: Benchmark, pool_size: int) -> ContainerPair:
+        address = ProjectContainerTool(benchmark=benchmark, sanitizer="address", pool_size=pool_size)
+        coverage = ProjectContainerTool(benchmark=benchmark, sanitizer="coverage", pool_size=pool_size)
         return ContainerPair(address, coverage)
 
     def get_container_pair(self) -> Optional[ContainerPair]:

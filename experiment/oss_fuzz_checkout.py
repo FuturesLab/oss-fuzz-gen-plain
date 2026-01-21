@@ -25,7 +25,7 @@ import uuid
 
 import yaml
 
-from project import benchmark as benchmarklib
+from experiment import benchmark as benchmarklib
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -566,14 +566,14 @@ def prepare_project_image_by_name_w_rebuild(project_name: str, sanitizer: str) -
 
     if not ENABLE_CACHING:
         logger.warning("Disabled caching when building image for %s", project)
-    elif is_image_cached(project, "address"):
+    elif is_image_cached(project, sanitizer):
         logger.info("Will use cached instance.")
         # Rewrite for caching.
         rewrite_project_to_cached_project(
-            project, generated_oss_fuzz_project, "address"
+            project, generated_oss_fuzz_project, sanitizer
         )
         # Prepare build
-        prepare_build(project, "address", generated_oss_fuzz_project)
+        prepare_build(project, sanitizer, generated_oss_fuzz_project)
         # Build the image
         logger.info(
             "Using cached project image for %s: %s",

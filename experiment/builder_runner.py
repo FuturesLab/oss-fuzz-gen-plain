@@ -655,13 +655,17 @@ class BuilderRunner:
         run_log_path = os.path.join(self.work_dirs.run_logs, f"{trial:02d}.log")
         self.run_target_local(generated_project, benchmark_target_name, run_log_path)
         artifact_dir = self.work_dirs.artifact(benchmark_target_name, iteration, trial)
-        outdir = get_build_artifact_dir(generated_project, "out")
+        if self.containers:
+            outdir = self.containers[0].vmap_outdir
+        else:
+            outdir = get_build_artifact_dir(generated_project, "out")
         self._copy_crash_file(outdir, artifact_dir, run_result)
 
         run_result.coverage, run_result.coverage_summary = self.get_coverage_local(
             generated_project, benchmark_target_name
         )
 
+        run_result.corpus_path = self.work_dirs.corpus(benchmark_target_name)
         run_result.log_path = run_log_path
 
         # Parse libfuzzer logs to get fuzz target runtime details.
@@ -682,9 +686,9 @@ class BuilderRunner:
 
         return build_result, run_result
 
-    def _run_target_with_reuse(self, log_path: str):
+    def _run_target_with_reuse(self, log_path: str, benchmark_name: str):
         address_container = self.containers[0]
-        address_container.fuzz(self.work_dirs, self.run_timeout, log_path)
+        address_container.fuzz(self.run_timeout, log_path, self.work_dirs.corpus(benchmark_name))
 
     def run_target_local(
         self, generated_project: str, benchmark_target_name: str, log_path: str
@@ -695,7 +699,7 @@ class BuilderRunner:
         logger.info("Running %s", generated_project)
 
         if self.containers is not None:
-            self._run_target_with_reuse(log_path)
+            self._run_target_with_reuse(log_path, benchmark_target_name)
             return
 
         corpus_dir = self.work_dirs.corpus(benchmark_target_name)
@@ -749,10 +753,10 @@ class BuilderRunner:
         else:
             raise ValueError("Unknown sanitizer passed to __build_target_with_reuse")
 
-        proc = container.compile(sanitizer=sanitizer, log_path=log_path)
+        proc = container.compile(log_path=log_path)
         if proc.returncode != 0:
             logger.info(
-                "Failed to build image for %s", container.generated_oss_fuzz_name
+                "Failed to compile harness for %s: log path: %s", container.generated_oss_fuzz_name, log_path
             )
             return False
 
@@ -946,9 +950,9 @@ class BuilderRunner:
                 )
             return new_textcov
 
-    def _get_coverage_with_reuse(self):
+    def _get_coverage_with_reuse(self, benchmark_name: str):
         coverage_container = self.containers[1]
-        coverage_container.get_coverage(self.work_dirs)
+        coverage_container.get_coverage(self.work_dirs.corpus(benchmark_name), benchmark_name)
         return coverage_container.generated_oss_fuzz_name
 
     def get_coverage_local(
@@ -969,7 +973,7 @@ class BuilderRunner:
 
         logger.info("Extracting coverage")
         if self.containers is not None:
-            generated_project = self._get_coverage_with_reuse()
+            generated_project = self._get_coverage_with_reuse(benchmark_target_name)
         else:
             corpus_dir = self.work_dirs.corpus(benchmark_target_name)
             command = [

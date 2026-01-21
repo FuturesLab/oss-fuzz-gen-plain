@@ -19,10 +19,10 @@ import subprocess as sp
 import time
 from typing import Optional
 
-from project.benchmark import Benchmark
-from utils.workdir import WorkDirs
-from utils import oss_fuzz_checkout
-from execution.base_tool import BaseTool
+from experiment.benchmark import Benchmark
+from experiment.workdir import WorkDirs
+from experiment import oss_fuzz_checkout
+from tool.base_tool import BaseTool
 
 logger = logging.getLogger(__name__)
 # logger.setLevel(logging.DEBUG)
@@ -44,13 +44,14 @@ class ProjectContainerTool(BaseTool):
     SANITIZERS = ["coverage", "address"]
 
     def __init__(
-        self, benchmark: Benchmark, sanitizer: str, name: str = "", project_name: str = ""
+        self, benchmark: Benchmark, sanitizer: str, name: str = "", project_name: str = "", pool_size: int = 4
     ) -> None:
         super().__init__(benchmark, name)
         
         self.benchmark = benchmark
         self.sanitizer = sanitizer
         self.project_name = project_name or benchmark.project
+        self.pool_size = pool_size
         
         self._validate_sanitizer()
         self.image_name = self._prepare_project_image(self.project_name, self.sanitizer)
@@ -61,6 +62,7 @@ class ProjectContainerTool(BaseTool):
         
         self.vmap_outdir = get_build_artifact_dir(self.generated_oss_fuzz_name, "out")
         self.vmap_workdir = get_build_artifact_dir(self.generated_oss_fuzz_name, "work")
+        self.vmap_ccache = get_ccache_dir(self.generated_oss_fuzz_name)
         
         self.container_id = self._start_docker_container()
         self.build_script_path = "/src/build.sh"
@@ -70,6 +72,8 @@ class ProjectContainerTool(BaseTool):
         if not self.rebuild_chronos_success:
             self._setup_container_env()
         
+        self.patch_compile_script()
+
         self.avg_cov_runtime = -1
         self.total_cov_executions = 0
 
@@ -101,6 +105,20 @@ class ProjectContainerTool(BaseTool):
             oss_fuzz_checkout.OSS_FUZZ_DIR, "projects", self.generated_oss_fuzz_name
         )
 
+    def patch_compile_script(self) -> str:
+        """
+        Copying the source directory on every recompilation can be extremely time+resource consuming. 
+        Don't re-copy source directory on every build, treat it as a one time cost instead, which is taken care of in _prepare_project_image.
+        I noticed cases where the rebuild itself would take ~7 seconds, while copying would take ~40 seconds when /src was > 1G
+        """
+        compile_path = os.path.join("/usr", "local", "bin", "compile")
+        proc =  self.execute(f"cat {compile_path}")
+        compile_contents = proc.stdout
+        original_cmd = 'COPY_SOURCES_CMD="cp -rL --parents $SRC $WORK /usr/include /usr/local/include $GOPATH $OSSFUZZ_RUSTPATH /rustc $OUT"'
+        new_cmd = 'COPY_SOURCES_CMD="cp -rL --parents $WORK /usr/include /usr/local/include $GOPATH $OSSFUZZ_RUSTPATH /rustc $OUT"'
+        new_contents = compile_contents.replace(original_cmd, new_cmd)
+
+        self.write_to_file(new_contents, compile_path)
 
     def tutorial(self) -> str:
         """Constructs a tool guide tutorial for LLM agents."""
@@ -221,6 +239,7 @@ EOF"""
             "--shm-size=2g",
             "--platform",
             "linux/amd64",
+            f"--cpus={self.pool_size}",
             "-t",
             "-e",
             "FUZZING_ENGINE=libfuzzer",
@@ -230,10 +249,14 @@ EOF"""
             f"PROJECT_NAME={self.generated_oss_fuzz_name}",
             "-e",
             f"FUZZING_LANGUAGE={self.benchmark.language}",
+            "-e",
+            "CCACHE_DIR=/workspace/ccache",
             "-v",
             f"{self.vmap_outdir}:/out",
             "-v",
             f"{self.vmap_workdir}:/work",
+            "-v",
+            f"{self.vmap_ccache}:/workspace/ccache",
             "--entrypoint=/bin/bash",
             f"{self.image_name}",
         ]
@@ -282,19 +305,17 @@ EOF"""
         # Hide Compilation command so that LLM won't reuse it in the inspection tool
         # and be distracted by irrelevant errors, e.g., `build/ already exits`.
         compile_process.args = "# Compiles the fuzz target."
-        if compile_process.returncode == 0:
-            logger.debug(
-                "Container %s: Successfully compiled fuzz driver with sanitizer %s in %.4f seconds",
-                self.container_id,
-                self.sanitizer,
-                end_time - begin_time,
-            )
+        logger.debug(
+            "Container %s: Compiled fuzz driver with sanitizer %s in %.4f seconds.",
+            self.container_id,
+            self.sanitizer,
+            end_time - begin_time,
+        )
         return compile_process
 
     def fuzz(
-        self, workdirs: WorkDirs, run_timeout: int, log_path: str, harness_id: str
+        self, run_timeout: int, log_path: str, corpus_dir: str
     ) -> None:
-        corpus_dir = workdirs.corpus(harness_id)
         command = [
             "python3",
             "infra/helper.py",
@@ -340,9 +361,11 @@ EOF"""
             runtime - self.avg_cov_runtime
         ) / self.total_cov_executions
 
-    def get_coverage(self, workdirs: WorkDirs, harness_id: str) -> sp.CompletedProcess:
+    def get_coverage(self, corpus_dir: str, harness_name: str= "") -> sp.CompletedProcess:
         """Allocate two minutes for coverage collection"""
-        corpus_dir = workdirs.corpus(harness_id)
+        corpus_size =  len(os.listdir(corpus_dir))
+        if corpus_size == 0:
+            logger.warning("Provided corpus path (%s) has no seeds in it!", corpus_dir)
         logger.debug("Corpus %s has size: %d", corpus_dir, len(os.listdir(corpus_dir)))
         command = [
             "python3",
@@ -374,9 +397,9 @@ EOF"""
             logger.debug("Container stdout:\n%s", proc.stdout)
         except sp.TimeoutExpired as e:
             logger.info(
-                "Coverage timed out in %s seconds for %s",
+                "Coverage timed out in %s seconds for harness %s",
                 timeout_threshold,
-                self.generated_oss_fuzz_name,
+                harness_name,
             )
         except sp.CalledProcessError as e:
             logger.info(
@@ -398,6 +421,10 @@ EOF"""
         )
         self.execute(replace_file_content_command)
 
+    def terminate(self) -> bool:
+        return True
+
+
 
 def get_build_artifact_dir(generated_project: str, build_artifact: str) -> str:
     """
@@ -407,6 +434,8 @@ def get_build_artifact_dir(generated_project: str, build_artifact: str) -> str:
         oss_fuzz_checkout.OSS_FUZZ_DIR, "build", build_artifact, generated_project
     )
 
+def get_ccache_dir(generated_project: str) -> str:
+    return os.path.join(oss_fuzz_checkout.OSS_FUZZ_DIR, "ccaches", generated_project, "ccache")
 
 def _libfuzzer_args(run_timeout: int) -> list[str]:
     return [

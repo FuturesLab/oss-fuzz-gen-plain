@@ -271,7 +271,7 @@ def prepare(oss_fuzz_dir: str) -> None:
 
 def setup_container_pool(benchmark: Benchmark, num_exp: int):
     global CONTAINER_POOL
-    CONTAINER_POOL = ContainerPool(benchmark, num_exp, NUM_EVA)
+    CONTAINER_POOL = ContainerPool(benchmark, num_exp * NUM_EVA)
 
 
 def store_successful_harness(
@@ -375,7 +375,7 @@ def _fuzzing_pipeline(
                 store_successful_harness(
                     r.fuzz_target_source,
                     r.build_script_source,
-                    r.work_dirs.corpus(r.benchmark.target_name),
+                    r.run_result.corpus_path,
                 )
 
     trial_logger.write_result(
