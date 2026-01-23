@@ -273,7 +273,7 @@ def setup_container_pool(benchmark: Benchmark, num_exp: int):
     global CONTAINER_POOL
     CONTAINER_POOL = ContainerPool(benchmark, num_exp * NUM_EVA)
 
-
+# --------------------
 def store_successful_harness(
     harness_source: str, build_script_source: str, corpus_path: str = ""
 ):
@@ -288,7 +288,7 @@ def store_successful_harness(
     )
     with open(artifact_path, "w") as f:
         json.dump(artifact_dict, f, indent=4)
-
+# --------------------
 
 def _fuzzing_pipeline(
     benchmark: Benchmark,
@@ -368,7 +368,7 @@ def _fuzzing_pipeline(
     trial_result = TrialResult(
         benchmark=benchmark, trial=trial, work_dirs=work_dirs, result_history=results
     )
-
+    # --------------------
     if "SHARED_CORPUS_PATH" in os.environ:
         for r in results:
             if isinstance(r, AnalysisResult) and r.success:
@@ -377,7 +377,7 @@ def _fuzzing_pipeline(
                     r.build_script_source,
                     r.run_result.corpus_path,
                 )
-
+    # --------------------
     trial_logger.write_result(
         result_status_dir=trial_result.best_result.work_dirs.status,
         result=trial_result,

@@ -619,6 +619,16 @@ def main():
         experiment_tasks = []
         with Pool(NUM_EXP, maxtasksperchild=1) as p:
             for target_benchmark in experiment_targets:
+                # --------------------
+                funcs_to_ignore = set()
+                shared_corpus_path = os.getenv("SHARED_CORPUS_PATH")
+                ignore_file = os.path.join(shared_corpus_path, "LLM-funcs-to-ignore.log")
+                if shared_corpus_path and os.path.exists(ignore_file):
+                    with open(ignore_file) as f:
+                        funcs_to_ignore = set(line.strip() for line in f)
+                # --------------------
+                if target_benchmark.function_name in funcs_to_ignore:
+                    continue
                 experiment_task = p.apply_async(
                     run_experiments,
                     (target_benchmark, args),
